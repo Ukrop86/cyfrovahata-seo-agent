@@ -1,31 +1,40 @@
 {
   "name": "cyfrovahata-seo-agent",
   "version": "1.0.0",
-  "description": "cyfrovahata-seo-agent",
-  "main": "index.js",
+  "description": "SEO agent for cyfrovahata.com.ua",
+  "main": "dist/index.js",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "scan": "npm run build && node dist/index.js scan",
+    "apply": "npm run build && node dist/index.js apply",
+    "proposals": "npm run build && node dist/index.js proposals",
+    "status": "npm run build && node dist/index.js status"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Ukrop86/cyfrovahata-seo-agent.git"
   },
-  "keywords": [],
+  "keywords": ["seo","wordpress","telegram","openai","sitemap"],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
   "bugs": {
     "url": "https://github.com/Ukrop86/cyfrovahata-seo-agent/issues"
   },
   "homepage": "https://github.com/Ukrop86/cyfrovahata-seo-agent#readme",
   "dependencies": {
+    "cheerio": "^1.0.0-rc.12",
     "dotenv": "^17.4.2",
+    "fast-xml-parser": "^4.0.12",
     "googleapis": "^173.0.0",
     "node-cron": "^4.2.1",
-    "openai": "^6.42.0"
+    "openai": "^6.42.0",
+    "sql.js": "^1.8.0"
   },
   "devDependencies": {
-    "@types/node": "^25.9.3",
+    "@types/node": "^20.14.3",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   }
