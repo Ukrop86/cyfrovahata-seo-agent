@@ -5,6 +5,9 @@ import path from 'path';
 const ENV_KEYS = [
   'DB_PATH',
   'GOOGLE_CLIENT_EMAIL',
+  'GOOGLE_SERVICE_ACCOUNT_JSON',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'GSC_SITE_URL',
   'GOOGLE_PRIVATE_KEY',
   'OPENAI_API_KEY',
   'SCAN_LIMIT',
@@ -33,6 +36,9 @@ export const config = {
   dbPath: process.env.DB_PATH ?? path.resolve(process.cwd(), 'data', 'seo-agent.db'),
   googleClientEmail: process.env.GOOGLE_CLIENT_EMAIL ?? '',
   googlePrivateKey: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n') ?? '',
+  googleServiceAccountJson: process.env.GOOGLE_SERVICE_ACCOUNT_JSON ?? '',
+  googleApplicationCredentials: process.env.GOOGLE_APPLICATION_CREDENTIALS ?? '',
+  gscSiteUrl: process.env.GSC_SITE_URL ?? '',
   openAiApiKey: process.env.OPENAI_API_KEY ?? '',
   scanLimit: Number(process.env.SCAN_LIMIT ?? '25'),
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? '',
@@ -52,6 +58,9 @@ export function envStatus(): Record<string, 'OK' | 'MISSING'> {
     'TELEGRAM_CHAT_ID',
     'GOOGLE_CLIENT_EMAIL',
     'GOOGLE_PRIVATE_KEY',
+    'GOOGLE_SERVICE_ACCOUNT_JSON',
+    'GOOGLE_APPLICATION_CREDENTIALS',
+    'GSC_SITE_URL',
     'DB_PATH',
   ];
   const out: Record<string, 'OK' | 'MISSING'> = {};

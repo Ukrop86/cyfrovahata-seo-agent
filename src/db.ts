@@ -1,7 +1,7 @@
 import initSqlJs from 'sql.js';
 import fs from 'fs';
 import path from 'path';
-import { MonitoringRecord, SeoPageData, SeoProposal } from './types.js';
+import { GscAnalyticsRecord, GscQueryRecord, MonitoringRecord, SeoAnalysisInsight, SeoChangeLogEntry, SeoPageData, SeoProposal } from './types.js';
 import { config } from './config.js';
 
 const dbPath = path.resolve(process.cwd(), config.dbPath);
@@ -68,14 +68,71 @@ const ready = initSqlJs().then((m: any) => {
         createdAt TEXT,
         updatedAt TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS gsc_analytics_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pageUrl TEXT,
+        date TEXT,
+        clicks INTEGER,
+        impressions INTEGER,
+        ctr REAL,
+        position REAL,
+        createdAt TEXT,
+        updatedAt TEXT,
+        UNIQUE(pageUrl, date)
+      );
+
+      CREATE TABLE IF NOT EXISTS gsc_query_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pageUrl TEXT,
+        query TEXT,
+        date TEXT,
+        clicks INTEGER,
+        impressions INTEGER,
+        ctr REAL,
+        position REAL,
+        createdAt TEXT,
+        updatedAt TEXT,
+        UNIQUE(pageUrl, query, date)
+      );
+
+      CREATE TABLE IF NOT EXISTS seo_change_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pageUrl TEXT,
+        changeType TEXT,
+        title TEXT,
+        description TEXT,
+        relatedProposalId INTEGER,
+        beforeSnapshot TEXT,
+        afterSnapshot TEXT,
+        appliedAt TEXT,
+        createdAt TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS seo_analysis_insights (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pageUrl TEXT,
+        period TEXT,
+        insightType TEXT,
+        severity TEXT,
+        title TEXT,
+        summary TEXT,
+        evidenceJson TEXT,
+        recommendation TEXT,
+        status TEXT,
+        createdAt TEXT
+      );
     `;
   db.run(schema);
+  ensureIndexes();
   if (fs.existsSync(dbPath)) {
     const bin = fs.readFileSync(dbPath);
     db = new SQL.Database(new Uint8Array(bin));
     db.run(schema);
     ensureSchema();
+    ensureIndexes();
   }
+  persist();
 });
 
 function persist() {
@@ -110,6 +167,20 @@ function ensureSchema() {
       db.run(`ALTER TABLE proposals ADD COLUMN ${col.name} ${col.type};`);
     }
   }
+}
+
+function ensureIndexes() {
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_gsc_records_date ON gsc_analytics_records(date);
+    CREATE INDEX IF NOT EXISTS idx_gsc_records_page ON gsc_analytics_records(pageUrl);
+    CREATE INDEX IF NOT EXISTS idx_gsc_query_records_date ON gsc_query_records(date);
+    CREATE INDEX IF NOT EXISTS idx_gsc_query_records_page ON gsc_query_records(pageUrl);
+    CREATE INDEX IF NOT EXISTS idx_gsc_query_records_query ON gsc_query_records(query);
+    CREATE INDEX IF NOT EXISTS idx_seo_change_log_page ON seo_change_log(pageUrl);
+    CREATE INDEX IF NOT EXISTS idx_seo_change_log_applied ON seo_change_log(appliedAt);
+    CREATE INDEX IF NOT EXISTS idx_seo_insights_period ON seo_analysis_insights(period);
+    CREATE INDEX IF NOT EXISTS idx_monitoring_records_page ON monitoring_records(pageUrl);
+  `);
 }
 
 async function ensureReady() {
@@ -438,4 +509,328 @@ export async function createMonitoringRecord(record: Omit<MonitoringRecord, 'id'
   persist();
 
   return { ...record, id, createdAt: now, updatedAt: now };
+}
+
+export async function upsertGscAnalyticsRecords(records: GscAnalyticsRecord[]): Promise<{ inserted: number; updated: number }> {
+  await ensureReady();
+  const now = new Date().toISOString();
+  let inserted = 0;
+  let updated = 0;
+  const existsStmt = db.prepare(`SELECT id FROM gsc_analytics_records WHERE pageUrl = ? AND date = ? LIMIT 1;`);
+  const stmt = db.prepare(`
+    INSERT INTO gsc_analytics_records (pageUrl,date,clicks,impressions,ctr,position,createdAt,updatedAt)
+    VALUES (?,?,?,?,?,?,?,?)
+    ON CONFLICT(pageUrl,date) DO UPDATE SET
+      clicks = excluded.clicks,
+      impressions = excluded.impressions,
+      ctr = excluded.ctr,
+      position = excluded.position,
+      updatedAt = excluded.updatedAt;
+  `);
+
+  for (const record of records) {
+    existsStmt.bind([record.pageUrl, record.date]);
+    const exists = existsStmt.step();
+    existsStmt.reset();
+    if (exists) updated += 1;
+    else inserted += 1;
+
+    stmt.bind(normalizeDbRow([
+      record.pageUrl,
+      record.date,
+      record.clicks,
+      record.impressions,
+      record.ctr,
+      record.position,
+      record.createdAt ?? now,
+      now,
+    ], ['pageUrl', 'date', 'clicks', 'impressions', 'ctr', 'position', 'createdAt', 'updatedAt'], record.pageUrl));
+    while (stmt.step()) {}
+    stmt.reset();
+  }
+  existsStmt.free();
+  stmt.free();
+  persist();
+  return { inserted, updated };
+}
+
+export async function getGscAnalyticsRecords(options: { pageUrl?: string; startDate?: string; endDate?: string } = {}): Promise<GscAnalyticsRecord[]> {
+  await ensureReady();
+  const clauses: string[] = [];
+  const values: any[] = [];
+  if (options.pageUrl) {
+    clauses.push('pageUrl = ?');
+    values.push(options.pageUrl);
+  }
+  if (options.startDate) {
+    clauses.push('date >= ?');
+    values.push(options.startDate);
+  }
+  if (options.endDate) {
+    clauses.push('date <= ?');
+    values.push(options.endDate);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const stmt = db.prepare(`SELECT * FROM gsc_analytics_records ${where} ORDER BY date ASC, pageUrl ASC;`);
+  stmt.bind(values);
+  const rows: GscAnalyticsRecord[] = [];
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    rows.push({
+      id: Number(row.id),
+      pageUrl: String(row.pageUrl ?? ''),
+      date: String(row.date ?? ''),
+      clicks: Number(row.clicks ?? 0),
+      impressions: Number(row.impressions ?? 0),
+      ctr: Number(row.ctr ?? 0),
+      position: Number(row.position ?? 0),
+      createdAt: row.createdAt ? String(row.createdAt) : undefined,
+      updatedAt: row.updatedAt ? String(row.updatedAt) : undefined,
+    });
+  }
+  stmt.free();
+  return rows;
+}
+
+export async function getLatestGscDate(): Promise<string | null> {
+  await ensureReady();
+  const stmt = db.prepare(`SELECT MAX(date) as date FROM gsc_analytics_records;`);
+  const date = stmt.step() ? stmt.getAsObject().date : null;
+  stmt.free();
+  return date ? String(date) : null;
+}
+
+export async function upsertGscQueryRecords(records: GscQueryRecord[]): Promise<{ inserted: number; updated: number }> {
+  await ensureReady();
+  const now = new Date().toISOString();
+  let inserted = 0;
+  let updated = 0;
+  const existsStmt = db.prepare(`SELECT id FROM gsc_query_records WHERE pageUrl = ? AND query = ? AND date = ? LIMIT 1;`);
+  const stmt = db.prepare(`
+    INSERT INTO gsc_query_records (pageUrl,query,date,clicks,impressions,ctr,position,createdAt,updatedAt)
+    VALUES (?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(pageUrl,query,date) DO UPDATE SET
+      clicks = excluded.clicks,
+      impressions = excluded.impressions,
+      ctr = excluded.ctr,
+      position = excluded.position,
+      updatedAt = excluded.updatedAt;
+  `);
+
+  for (const record of records) {
+    existsStmt.bind([record.pageUrl, record.query, record.date]);
+    const exists = existsStmt.step();
+    existsStmt.reset();
+    if (exists) updated += 1;
+    else inserted += 1;
+
+    stmt.bind(normalizeDbRow([
+      record.pageUrl,
+      record.query,
+      record.date,
+      record.clicks,
+      record.impressions,
+      record.ctr,
+      record.position,
+      record.createdAt ?? now,
+      now,
+    ], ['pageUrl', 'query', 'date', 'clicks', 'impressions', 'ctr', 'position', 'createdAt', 'updatedAt'], record.pageUrl));
+    while (stmt.step()) {}
+    stmt.reset();
+  }
+  existsStmt.free();
+  stmt.free();
+  persist();
+  return { inserted, updated };
+}
+
+export async function getGscQueryRecords(options: { pageUrl?: string; query?: string; startDate?: string; endDate?: string } = {}): Promise<GscQueryRecord[]> {
+  await ensureReady();
+  const clauses: string[] = [];
+  const values: any[] = [];
+  if (options.pageUrl) {
+    clauses.push('pageUrl = ?');
+    values.push(options.pageUrl);
+  }
+  if (options.query) {
+    clauses.push('query = ?');
+    values.push(options.query);
+  }
+  if (options.startDate) {
+    clauses.push('date >= ?');
+    values.push(options.startDate);
+  }
+  if (options.endDate) {
+    clauses.push('date <= ?');
+    values.push(options.endDate);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const stmt = db.prepare(`SELECT * FROM gsc_query_records ${where} ORDER BY date ASC, impressions DESC, query ASC;`);
+  stmt.bind(values);
+  const rows: GscQueryRecord[] = [];
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    rows.push({
+      id: Number(row.id),
+      pageUrl: String(row.pageUrl ?? ''),
+      query: String(row.query ?? ''),
+      date: String(row.date ?? ''),
+      clicks: Number(row.clicks ?? 0),
+      impressions: Number(row.impressions ?? 0),
+      ctr: Number(row.ctr ?? 0),
+      position: Number(row.position ?? 0),
+      createdAt: row.createdAt ? String(row.createdAt) : undefined,
+      updatedAt: row.updatedAt ? String(row.updatedAt) : undefined,
+    });
+  }
+  stmt.free();
+  return rows;
+}
+
+export async function getLatestGscQueryDate(): Promise<string | null> {
+  await ensureReady();
+  const stmt = db.prepare(`SELECT MAX(date) as date FROM gsc_query_records;`);
+  const date = stmt.step() ? stmt.getAsObject().date : null;
+  stmt.free();
+  return date ? String(date) : null;
+}
+
+export async function createSeoChangeLogEntry(entry: Omit<SeoChangeLogEntry, 'id' | 'createdAt'>): Promise<SeoChangeLogEntry> {
+  await ensureReady();
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO seo_change_log (pageUrl,changeType,title,description,relatedProposalId,beforeSnapshot,afterSnapshot,appliedAt,createdAt)
+    VALUES (?,?,?,?,?,?,?,?,?);
+  `);
+  stmt.bind(normalizeDbRow([
+    entry.pageUrl,
+    entry.changeType,
+    entry.title,
+    entry.description,
+    entry.relatedProposalId ?? null,
+    entry.beforeSnapshot ?? null,
+    entry.afterSnapshot ?? null,
+    entry.appliedAt,
+    now,
+  ], ['pageUrl', 'changeType', 'title', 'description', 'relatedProposalId', 'beforeSnapshot', 'afterSnapshot', 'appliedAt', 'createdAt'], entry.pageUrl));
+  while (stmt.step()) {}
+  stmt.free();
+
+  const idStmt = db.prepare(`SELECT last_insert_rowid() as id;`);
+  const id = idStmt.step() ? Number(idStmt.getAsObject().id) : undefined;
+  idStmt.free();
+  persist();
+
+  return { ...entry, id, createdAt: now };
+}
+
+export async function getSeoChangeLogEntries(options: { pageUrl?: string; startDate?: string; endDate?: string } = {}): Promise<SeoChangeLogEntry[]> {
+  await ensureReady();
+  const clauses: string[] = [];
+  const values: any[] = [];
+  if (options.pageUrl) {
+    clauses.push('pageUrl = ?');
+    values.push(options.pageUrl);
+  }
+  if (options.startDate) {
+    clauses.push('appliedAt >= ?');
+    values.push(options.startDate);
+  }
+  if (options.endDate) {
+    clauses.push('appliedAt <= ?');
+    values.push(options.endDate);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const stmt = db.prepare(`SELECT * FROM seo_change_log ${where} ORDER BY appliedAt DESC, id DESC;`);
+  stmt.bind(values);
+  const rows: SeoChangeLogEntry[] = [];
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    rows.push(rowToSeoChange(row));
+  }
+  stmt.free();
+  return rows;
+}
+
+export async function getSeoChangeLogEntryById(id: number): Promise<SeoChangeLogEntry | null> {
+  await ensureReady();
+  const stmt = db.prepare(`SELECT * FROM seo_change_log WHERE id = ? LIMIT 1;`);
+  stmt.bind([id]);
+  const row = stmt.step() ? stmt.getAsObject() : null;
+  stmt.free();
+  return row ? rowToSeoChange(row) : null;
+}
+
+function rowToSeoChange(row: any): SeoChangeLogEntry {
+  return {
+    id: Number(row.id),
+    pageUrl: String(row.pageUrl ?? ''),
+    changeType: String(row.changeType ?? ''),
+    title: String(row.title ?? ''),
+    description: String(row.description ?? ''),
+    relatedProposalId: row.relatedProposalId === null || row.relatedProposalId === undefined ? undefined : Number(row.relatedProposalId),
+    beforeSnapshot: row.beforeSnapshot ? String(row.beforeSnapshot) : undefined,
+    afterSnapshot: row.afterSnapshot ? String(row.afterSnapshot) : undefined,
+    appliedAt: String(row.appliedAt ?? ''),
+    createdAt: row.createdAt ? String(row.createdAt) : undefined,
+  };
+}
+
+export async function saveSeoAnalysisInsight(insight: Omit<SeoAnalysisInsight, 'id' | 'createdAt'>): Promise<SeoAnalysisInsight> {
+  await ensureReady();
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO seo_analysis_insights (pageUrl,period,insightType,severity,title,summary,evidenceJson,recommendation,status,createdAt)
+    VALUES (?,?,?,?,?,?,?,?,?,?);
+  `);
+  stmt.bind(normalizeDbRow([
+    insight.pageUrl ?? null,
+    insight.period,
+    insight.insightType,
+    insight.severity,
+    insight.title,
+    insight.summary,
+    insight.evidenceJson,
+    insight.recommendation,
+    insight.status,
+    now,
+  ], ['pageUrl', 'period', 'insightType', 'severity', 'title', 'summary', 'evidenceJson', 'recommendation', 'status', 'createdAt'], insight.pageUrl));
+  while (stmt.step()) {}
+  stmt.free();
+  const idStmt = db.prepare(`SELECT last_insert_rowid() as id;`);
+  const id = idStmt.step() ? Number(idStmt.getAsObject().id) : undefined;
+  idStmt.free();
+  persist();
+  return { ...insight, id, createdAt: now };
+}
+
+export async function getMonitoringRecords(pageUrl?: string): Promise<MonitoringRecord[]> {
+  await ensureReady();
+  const stmt = pageUrl
+    ? db.prepare(`SELECT * FROM monitoring_records WHERE pageUrl = ? ORDER BY createdAt DESC;`)
+    : db.prepare(`SELECT * FROM monitoring_records ORDER BY createdAt DESC;`);
+  if (pageUrl) stmt.bind([pageUrl]);
+  const rows: MonitoringRecord[] = [];
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    rows.push({
+      id: Number(row.id),
+      proposalId: Number(row.proposalId ?? 0),
+      pageUrl: String(row.pageUrl ?? ''),
+      status: row.status as MonitoringRecord['status'],
+      createdAt: row.createdAt ? String(row.createdAt) : undefined,
+      updatedAt: row.updatedAt ? String(row.updatedAt) : undefined,
+    });
+  }
+  stmt.free();
+  return rows;
+}
+
+export async function getAllProposals(): Promise<SeoProposal[]> {
+  await ensureReady();
+  const stmt = db.prepare(`SELECT * FROM proposals ORDER BY createdAt DESC, id DESC;`);
+  const rows: SeoProposal[] = [];
+  while (stmt.step()) rows.push(toSeoProposal(stmt.getAsObject()));
+  stmt.free();
+  return rows;
 }

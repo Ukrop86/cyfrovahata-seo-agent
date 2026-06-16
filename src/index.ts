@@ -4,12 +4,31 @@ import path from 'path';
 import { parseSitemap } from './sitemap.js';
 import { analyzeHtml } from './seo.js';
 import { fetchText } from './http.js';
-import { savePage, saveProposal, getPendingProposals, getProposalById, getProposalBySignature, getProposalsByPage, getStats, getPages, saveScanRun, getDbStats, cleanupFailedProposals, getProposalsForExport } from './db.js';
+import { savePage, saveProposal, getPendingProposals, getProposalById, getProposalBySignature, getProposalsByPage, getStats, getPages, saveScanRun, getDbStats, cleanupFailedProposals, getProposalsForExport, getSeoChangeLogEntryById } from './db.js';
 import { createSeoProposals } from './openai.js';
 import { getWpPageByUrl, updateWpContent, isWpArchiveUrl, isEditableWpContentUrl } from './wordpress.js';
 import { sendScanReport, sendProposalsReport, sendApplySuccessReport, sendApplyFailureReport, sendTelegramTest, sendTelegramReport } from './telegram.js';
 import { appendAgentBlock, hasAgentBlockForProposal, hasAgentBlockForType } from './content.js';
 import { config, printStartupDiagnostics, validateForCommand } from './config.js';
+import {
+  buildAnalyticsReport,
+  buildSeoKeywordReport,
+  buildSeoAnalystReport,
+  checkGscConnection,
+  evaluateSeoChangeImpact,
+  getPageSeoHealth,
+  getPageQueries,
+  getQueryCtrProblems,
+  getQueryOpportunities,
+  getTopQueries,
+  getSeoCtrProblems,
+  getSeoLosers,
+  getSeoOpportunities,
+  getSeoWinners,
+  syncGscAnalytics,
+  syncGscQueryAnalytics,
+} from './analytics.js';
+import type { PageDelta, QueryDelta } from './analytics.js';
 
 async function scan() {
   const sitemapUrl = `${config.wpBaseUrl.replace(/\/$/, '')}/sitemap.xml`;
@@ -290,11 +309,33 @@ async function status() {
 const command = process.argv[2];
 
 if (!command || command === 'help') {
-  console.log('Usage: node dist/index.js [scan|proposals|apply|status|db-stats|cleanup-failed|export-proposals|proposal-detail|cleanup-invalid|cleanup-archives|telegram-test]');
+  console.log('Usage: node dist/index.js [scan|proposals|apply|status|db-stats|cleanup-failed|export-proposals|analytics-check|analytics-sync|analytics-sync-queries|analytics-report|send-daily-seo-report|send-weekly-seo-report|send-monthly-seo-report|daily-seo-job|weekly-seo-job|monthly-seo-job|daily-seo-report|weekly-seo-report|monthly-seo-report|seo-analyst-report|seo-keyword-report|seo-winners|seo-losers|seo-ctr-problems|seo-opportunities|query-analysis|query-opportunities|query-ctr-problems|page-query-analysis|page-health|change-impact|proposal-detail|cleanup-invalid|cleanup-archives|telegram-test]');
   console.log('       npx tsx src/index.ts proposal-detail <id>');
   console.log('       npx tsx src/index.ts db-stats');
   console.log('       npx tsx src/index.ts cleanup-failed');
   console.log('       npx tsx src/index.ts export-proposals');
+  console.log('       npx tsx src/index.ts analytics-check');
+  console.log('       npx tsx src/index.ts analytics-sync [days]');
+  console.log('       npx tsx src/index.ts analytics-sync-queries [days]');
+  console.log('       npx tsx src/index.ts analytics-report [daily|weekly|monthly]');
+  console.log('       npx tsx src/index.ts send-daily-seo-report');
+  console.log('       npx tsx src/index.ts send-weekly-seo-report');
+  console.log('       npx tsx src/index.ts send-monthly-seo-report');
+  console.log('       npx tsx src/index.ts daily-seo-job');
+  console.log('       npx tsx src/index.ts weekly-seo-job');
+  console.log('       npx tsx src/index.ts monthly-seo-job');
+  console.log('       npx tsx src/index.ts seo-analyst-report');
+  console.log('       npx tsx src/index.ts seo-keyword-report');
+  console.log('       npx tsx src/index.ts seo-winners');
+  console.log('       npx tsx src/index.ts seo-losers');
+  console.log('       npx tsx src/index.ts seo-ctr-problems');
+  console.log('       npx tsx src/index.ts seo-opportunities');
+  console.log('       npx tsx src/index.ts query-analysis');
+  console.log('       npx tsx src/index.ts query-opportunities');
+  console.log('       npx tsx src/index.ts query-ctr-problems');
+  console.log('       npx tsx src/index.ts page-query-analysis <url>');
+  console.log('       npx tsx src/index.ts page-health <url>');
+  console.log('       npx tsx src/index.ts change-impact <changeId>');
   console.log('       npx tsx src/index.ts cleanup-invalid');
   console.log('       npx tsx src/index.ts cleanup-archives');
   process.exit(0);
@@ -322,6 +363,71 @@ async function runCommand() {
     await cleanupFailed();
   } else if (command === 'export-proposals') {
     await exportProposals();
+  } else if (command === 'analytics-check') {
+    await analyticsCheck();
+  } else if (command === 'analytics-sync') {
+    await analyticsSync();
+  } else if (command === 'analytics-sync-queries') {
+    await analyticsSyncQueries();
+  } else if (command === 'analytics-report') {
+    await analyticsReport((process.argv[3] ?? 'daily') as 'daily' | 'weekly' | 'monthly');
+  } else if (command === 'send-daily-seo-report') {
+    await syncThenReport('daily', 30);
+  } else if (command === 'send-weekly-seo-report') {
+    await syncThenReport('weekly', 90);
+  } else if (command === 'send-monthly-seo-report') {
+    await syncThenReport('monthly', 180);
+  } else if (command === 'daily-seo-job') {
+    await syncThenReport('daily', 30);
+  } else if (command === 'weekly-seo-job') {
+    await syncThenReport('weekly', 90);
+  } else if (command === 'monthly-seo-job') {
+    await syncThenReport('monthly', 180);
+  } else if (command === 'daily-seo-report') {
+    await analyticsReport('daily');
+  } else if (command === 'weekly-seo-report') {
+    await analyticsReport('weekly');
+  } else if (command === 'monthly-seo-report') {
+    await analyticsReport('monthly');
+  } else if (command === 'seo-analyst-report') {
+    await seoAnalystReport();
+  } else if (command === 'seo-keyword-report') {
+    await seoKeywordReport();
+  } else if (command === 'seo-winners') {
+    await seoWinners();
+  } else if (command === 'seo-losers') {
+    await seoLosers();
+  } else if (command === 'seo-ctr-problems') {
+    await seoCtrProblems();
+  } else if (command === 'seo-opportunities') {
+    await seoOpportunities();
+  } else if (command === 'query-analysis') {
+    await queryAnalysis();
+  } else if (command === 'query-opportunities') {
+    await queryOpportunities();
+  } else if (command === 'query-ctr-problems') {
+    await queryCtrProblems();
+  } else if (command === 'page-query-analysis') {
+    const pageUrl = process.argv[3];
+    if (!pageUrl) {
+      console.error('Usage: npx tsx src/index.ts page-query-analysis <url>');
+      process.exit(1);
+    }
+    await pageQueryAnalysis(pageUrl);
+  } else if (command === 'page-health') {
+    const pageUrl = process.argv[3];
+    if (!pageUrl) {
+      console.error('Usage: npx tsx src/index.ts page-health <url>');
+      process.exit(1);
+    }
+    await pageHealth(pageUrl);
+  } else if (command === 'change-impact') {
+    const id = Number(process.argv[3]);
+    if (Number.isNaN(id)) {
+      console.error('Usage: npx tsx src/index.ts change-impact <changeId>');
+      process.exit(1);
+    }
+    await changeImpact(id);
   } else if (command === 'proposal-detail') {
     const id = process.argv[3];
     if (!id) {
@@ -425,6 +531,246 @@ async function exportProposals() {
   fs.writeFileSync(file, `${lines.join('\n')}\n`, 'utf8');
   console.log(`Exported proposals: ${rows.length}`);
   console.log(`File: ${file}`);
+}
+
+async function analyticsCheck() {
+  const result = await checkGscConnection();
+  console.log('GSC analytics check');
+  console.log(`Site URL: ${result.siteUrl || '(missing)'}`);
+  console.log(`Service account email: ${result.serviceAccountEmail || '(missing)'}`);
+  if (!result.ok) {
+    console.error(`❌ ${result.error}`);
+    process.exit(1);
+  }
+  console.log(`Credential source: ${result.credentialSource}`);
+  console.log(`Test rows returned: ${result.rows}`);
+  console.log('✅ GSC connection successful');
+}
+
+async function analyticsSync() {
+  const days = Number(process.argv[3] ?? '90');
+  const result = await syncGscAnalytics(Number.isFinite(days) && days > 0 ? days : 90);
+  printAnalyticsSyncResult(result);
+}
+
+async function analyticsSyncQueries() {
+  const days = Number(process.argv[3] ?? '90');
+  const result = await syncGscQueryAnalytics(Number.isFinite(days) && days > 0 ? days : 90);
+  console.log('Query analytics sync completed');
+  console.log('');
+  console.log(`Rows received: ${result.rowsReceived}`);
+  console.log(`Pages found: ${result.pagesFound}`);
+  console.log(`Queries found: ${result.queriesFound}`);
+  console.log(`Date range: ${result.startDate} → ${result.endDate}`);
+  console.log('');
+  console.log(`Inserted: ${result.inserted}`);
+  console.log(`Updated: ${result.updated}`);
+}
+
+async function analyticsReport(kind: 'daily' | 'weekly' | 'monthly') {
+  if (!['daily', 'weekly', 'monthly'].includes(kind)) {
+    console.error('Usage: npx tsx src/index.ts analytics-report [daily|weekly|monthly]');
+    process.exit(1);
+  }
+  const report = await buildAnalyticsReport(kind);
+  console.log(report);
+  try {
+    await sendTelegramReport(report);
+    console.log('Telegram analytics report: sent');
+  } catch (error) {
+    console.error('Telegram analytics report failed:', error instanceof Error ? error.message : error);
+  }
+}
+
+function printAnalyticsSyncResult(result: Awaited<ReturnType<typeof syncGscAnalytics>>) {
+  console.log('Analytics sync completed');
+  console.log('');
+  console.log(`Rows received: ${result.rowsReceived}`);
+  console.log(`Pages found: ${result.pagesFound}`);
+  console.log(`Date range: ${result.startDate} → ${result.endDate}`);
+  console.log('');
+  console.log(`Inserted: ${result.inserted}`);
+  console.log(`Updated: ${result.updated}`);
+}
+
+async function syncThenReport(kind: 'daily' | 'weekly' | 'monthly', days: number) {
+  const result = await syncGscAnalytics(days);
+  printAnalyticsSyncResult(result);
+  console.log('');
+  await analyticsReport(kind);
+}
+
+async function seoAnalystReport() {
+  const report = await buildSeoAnalystReport();
+  console.log(report);
+  try {
+    await sendTelegramReport(report);
+    console.log('Telegram SEO analyst report: sent');
+  } catch (error) {
+    console.error('Telegram SEO analyst report failed:', error instanceof Error ? error.message : error);
+  }
+}
+
+async function seoKeywordReport() {
+  const report = await buildSeoKeywordReport();
+  console.log(report);
+}
+
+function printPageDeltaRows(rows: PageDelta[], emptyMessage = 'No GSC data found.') {
+  if (!rows.length) {
+    console.log(emptyMessage);
+    return;
+  }
+  rows.forEach((row, index) => {
+    console.log(`${index + 1}. ${row.pageUrl}`);
+    console.log(`   clicks: ${row.previous.clicks} -> ${row.current.clicks} (${row.clicksDiff >= 0 ? '+' : ''}${row.clicksDiff})`);
+    console.log(`   impressions: ${row.previous.impressions} -> ${row.current.impressions} (${row.impressionsDiff >= 0 ? '+' : ''}${row.impressionsDiff})`);
+    console.log(`   CTR: ${(row.previous.ctr * 100).toFixed(2)}% -> ${(row.current.ctr * 100).toFixed(2)}%`);
+    console.log(`   position: ${row.previous.position.toFixed(2)} -> ${row.current.position.toFixed(2)}`);
+    if (row.problemType) console.log(`   type: ${row.problemType}`);
+    if (row.lowData) console.log('   note: low data, watch only');
+    else if (row.note) console.log(`   note: ${row.note}`);
+  });
+}
+
+function printQueryRows(rows: QueryDelta[], emptyMessage = 'No query data found.') {
+  if (!rows.length) {
+    console.log(emptyMessage);
+    return;
+  }
+  rows.forEach((row, index) => {
+    console.log('');
+    console.log(`${index + 1}. ${row.query}`);
+    if (row.pageUrl) console.log(`   page: ${row.pageUrl}`);
+    console.log(`   clicks: ${row.current.clicks}`);
+    console.log(`   impressions: ${row.current.impressions}`);
+    console.log(`   CTR: ${(row.current.ctr * 100).toFixed(2)}%`);
+    console.log(`   position: ${row.current.position.toFixed(2)}`);
+    if (row.problemType) console.log(`   type: ${row.problemType}`);
+    if (row.lowData) console.log('   note: low data, watch only');
+  });
+}
+
+async function seoWinners() {
+  console.log('SEO winners (last 30 days vs previous 30 days)');
+  printPageDeltaRows(await getSeoWinners(30), 'No SEO winners found.');
+}
+
+async function seoLosers() {
+  console.log('SEO losers (last 30 days vs previous 30 days)');
+  printPageDeltaRows(await getSeoLosers(30), 'No SEO losers found.');
+}
+
+async function seoCtrProblems() {
+  console.log('SEO CTR problems');
+  const rows = await getSeoCtrProblems(30);
+  if (!rows.length) {
+    console.log('No CTR problems found.');
+    return;
+  }
+  rows.forEach((row, index) => {
+    console.log('');
+    console.log(`${index + 1}. ${row.pageUrl}`);
+    console.log(`   impressions: ${row.previous.impressions} -> ${row.current.impressions} (${row.impressionsDiff >= 0 ? '+' : ''}${row.impressionsDiff})`);
+    console.log(`   clicks: ${row.previous.clicks} -> ${row.current.clicks} (${row.clicksDiff >= 0 ? '+' : ''}${row.clicksDiff})`);
+    console.log(`   CTR: ${(row.previous.ctr * 100).toFixed(2)}% -> ${(row.current.ctr * 100).toFixed(2)}%`);
+    console.log(`   position: ${row.previous.position.toFixed(2)} -> ${row.current.position.toFixed(2)}`);
+    console.log('   problem: Google shows page more often, but fewer users click.');
+    console.log('   suggested action: review title/meta/snippet, but do not rewrite full content yet.');
+    if (row.lowData) console.log('   note: low data, watch only');
+  });
+}
+
+async function seoOpportunities() {
+  console.log('SEO opportunities');
+  const rows = await getSeoOpportunities(30);
+  if (!rows.length) {
+    console.log('No SEO opportunities found.');
+    return;
+  }
+  rows.forEach((row, index) => {
+    console.log('');
+    console.log(`${index + 1}. ${row.pageUrl}`);
+    console.log(`   position: ${row.current.position.toFixed(2)}`);
+    console.log(`   impressions: ${row.current.impressions}`);
+    console.log(`   clicks: ${row.current.clicks}`);
+    console.log(`   CTR: ${(row.current.ctr * 100).toFixed(2)}%`);
+    console.log('   opportunity: page is close to top 10, needs title/snippet/internal links improvement.');
+    if (row.lowData) console.log('   note: low data, watch only');
+  });
+}
+
+async function queryAnalysis() {
+  console.log('Query analysis');
+  printQueryRows(await getTopQueries(90), 'No query data found. Run analytics-sync-queries first.');
+}
+
+async function queryOpportunities() {
+  console.log('Query opportunities');
+  const rows = await getQueryOpportunities(90);
+  if (!rows.length) {
+    console.log('No query opportunities found.');
+    return;
+  }
+  rows.forEach((row, index) => {
+    console.log('');
+    console.log(`${index + 1}. ${row.query}`);
+    if (row.pageUrl) console.log(`   page: ${row.pageUrl}`);
+    console.log(`   position: ${row.current.position.toFixed(2)}`);
+    console.log(`   impressions: ${row.current.impressions}`);
+    console.log(`   clicks: ${row.current.clicks}`);
+    console.log(`   CTR: ${(row.current.ctr * 100).toFixed(2)}%`);
+    console.log('   opportunity: можна підсилити сторінку або створити окремий контент.');
+    if (row.lowData) console.log('   note: low data, watch only');
+  });
+}
+
+async function queryCtrProblems() {
+  console.log('Query CTR problems');
+  const rows = await getQueryCtrProblems(90);
+  if (!rows.length) {
+    console.log('No query CTR problems found.');
+    return;
+  }
+  rows.forEach((row, index) => {
+    console.log('');
+    console.log(`${index + 1}. ${row.query}`);
+    if (row.pageUrl) console.log(`   page: ${row.pageUrl}`);
+    console.log(`   position: ${row.current.position.toFixed(2)}`);
+    console.log(`   impressions: ${row.current.impressions}`);
+    console.log(`   clicks: ${row.current.clicks}`);
+    console.log(`   CTR: ${(row.current.ctr * 100).toFixed(2)}%`);
+    console.log('   problem: користувачі бачать сторінку, але майже не клікають.');
+  });
+}
+
+async function pageQueryAnalysis(pageUrl: string) {
+  console.log(`Page query analysis: ${pageUrl}`);
+  printQueryRows(await getPageQueries(pageUrl, 90), 'No queries found for this page. Run analytics-sync-queries first.');
+}
+
+async function pageHealth(pageUrl: string) {
+  const health = await getPageSeoHealth(pageUrl);
+  console.log(`Page: ${health.pageUrl}`);
+  console.log(`clicksTrend: ${health.clicksTrend}`);
+  console.log(`impressionsTrend: ${health.impressionsTrend}`);
+  console.log(`ctrTrend: ${(health.ctrTrend * 100).toFixed(2)}%`);
+  console.log(`positionTrend: ${health.positionTrend.toFixed(2)}`);
+  console.log(`lastSeoChange: ${health.lastSeoChange ? `${health.lastSeoChange.id} ${health.lastSeoChange.appliedAt}` : 'none'}`);
+  console.log(`lastSeoChangeStatus: ${health.lastSeoChangeStatus}`);
+  console.log(`recommendationStatus: ${health.recommendationStatus}`);
+}
+
+async function changeImpact(changeId: number) {
+  const changes = await getSeoChangeLogEntryById(changeId);
+  if (!changes) {
+    console.error(`SEO change ${changeId} not found.`);
+    process.exit(1);
+  }
+  const status = await evaluateSeoChangeImpact(changes.pageUrl, changeId);
+  console.log(`changeId: ${changeId}`);
+  console.log(`pageUrl: ${changes.pageUrl}`);
+  console.log(`result: ${status}`);
 }
 
 async function cleanupInvalid() {

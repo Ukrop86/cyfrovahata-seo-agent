@@ -1,11 +1,14 @@
-import { google } from 'googleapis';
+import { createRequire } from 'module';
 import { config } from './config.js';
+
+const require = createRequire(import.meta.url);
 
 export async function getSearchConsoleData(siteUrl: string) {
   if (!config.googleClientEmail || !config.googlePrivateKey) {
     throw new Error('Google Search Console credentials not configured.');
   }
 
+  const { google } = require('googleapis') as any;
   const auth = new google.auth.GoogleAuth({
     credentials: {
       client_email: config.googleClientEmail,

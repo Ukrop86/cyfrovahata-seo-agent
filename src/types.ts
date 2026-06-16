@@ -106,3 +106,102 @@ export interface MonitoringRecord {
   createdAt?: string;
   updatedAt?: string;
 }
+
+export interface GscAnalyticsRecord {
+  id?: number;
+  pageUrl: string;
+  date: string;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  position: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface GscQueryRecord {
+  id?: number;
+  pageUrl: string;
+  query: string;
+  date: string;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  position: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type SeoChangeType =
+  | 'title_update'
+  | 'meta_description_update'
+  | 'content_block_added'
+  | 'faq_added'
+  | 'seo_block_added'
+  | 'internal_links_added'
+  | 'article_added'
+  | 'manual_change'
+  | 'technical_fix';
+
+export interface SeoChangeLogEntry {
+  id?: number;
+  pageUrl: string;
+  changeType: SeoChangeType | string;
+  title: string;
+  description: string;
+  relatedProposalId?: number;
+  beforeSnapshot?: string;
+  afterSnapshot?: string;
+  appliedAt: string;
+  createdAt?: string;
+}
+
+export type SeoInsightType =
+  | 'growth'
+  | 'decline'
+  | 'stable'
+  | 'not_enough_data'
+  | 'waiting_for_result'
+  | 'opportunity'
+  | 'cannibalization_risk'
+  | 'ctr_problem'
+  | 'position_problem'
+  | 'content_fatigue';
+
+export type SeoInsightStatus = 'new' | 'reviewed' | 'ignored' | 'action_planned' | 'action_done';
+
+export interface SeoAnalysisInsight {
+  id?: number;
+  pageUrl?: string;
+  period: string;
+  insightType: SeoInsightType;
+  severity: 'low' | 'medium' | 'high';
+  title: string;
+  summary: string;
+  evidenceJson: string;
+  recommendation: string;
+  status: SeoInsightStatus;
+  createdAt?: string;
+}
+
+export type SeoChangeImpactStatus = 'waiting_for_result' | 'improved' | 'unchanged' | 'declined' | 'not_enough_data';
+
+export type RecommendationStatus =
+  | 'do_not_touch'
+  | 'wait'
+  | 'analyze'
+  | 'improve_ctr'
+  | 'improve_content'
+  | 'improve_internal_links'
+  | 'create_supporting_article';
+
+export interface PageSeoHealth {
+  pageUrl: string;
+  clicksTrend: number;
+  impressionsTrend: number;
+  ctrTrend: number;
+  positionTrend: number;
+  lastSeoChange?: SeoChangeLogEntry;
+  lastSeoChangeStatus: SeoChangeImpactStatus;
+  recommendationStatus: RecommendationStatus;
+}
