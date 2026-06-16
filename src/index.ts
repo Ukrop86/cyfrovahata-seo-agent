@@ -1,8 +1,10 @@
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import { parseSitemap } from './sitemap.js';
 import { analyzeHtml } from './seo.js';
 import { fetchText } from './http.js';
-import { savePage, saveProposal, getPendingProposals, getProposalById, getProposalBySignature, getProposalsByPage, getStats, getPages, saveScanRun } from './db.js';
+import { savePage, saveProposal, getPendingProposals, getProposalById, getProposalBySignature, getProposalsByPage, getStats, getPages, saveScanRun, getDbStats, cleanupFailedProposals, getProposalsForExport } from './db.js';
 import { createSeoProposals } from './openai.js';
 import { getWpPageByUrl, updateWpContent, isWpArchiveUrl, isEditableWpContentUrl } from './wordpress.js';
 import { sendScanReport, sendProposalsReport, sendApplySuccessReport, sendApplyFailureReport, sendTelegramTest, sendTelegramReport } from './telegram.js';
@@ -288,8 +290,11 @@ async function status() {
 const command = process.argv[2];
 
 if (!command || command === 'help') {
-  console.log('Usage: node dist/index.js [scan|proposals|apply|status|proposal-detail|cleanup-invalid|cleanup-archives|telegram-test]');
+  console.log('Usage: node dist/index.js [scan|proposals|apply|status|db-stats|cleanup-failed|export-proposals|proposal-detail|cleanup-invalid|cleanup-archives|telegram-test]');
   console.log('       npx tsx src/index.ts proposal-detail <id>');
+  console.log('       npx tsx src/index.ts db-stats');
+  console.log('       npx tsx src/index.ts cleanup-failed');
+  console.log('       npx tsx src/index.ts export-proposals');
   console.log('       npx tsx src/index.ts cleanup-invalid');
   console.log('       npx tsx src/index.ts cleanup-archives');
   process.exit(0);
@@ -311,6 +316,12 @@ async function runCommand() {
     await apply();
   } else if (command === 'status') {
     await status();
+  } else if (command === 'db-stats') {
+    await dbStats();
+  } else if (command === 'cleanup-failed') {
+    await cleanupFailed();
+  } else if (command === 'export-proposals') {
+    await exportProposals();
   } else if (command === 'proposal-detail') {
     const id = process.argv[3];
     if (!id) {
@@ -357,6 +368,63 @@ async function proposalDetail(id: number) {
   console.log(`status: ${proposal.status}`);
   console.log('proposedHtml:');
   console.log(proposal.proposedHtml);
+}
+
+async function dbStats() {
+  const stats = await getDbStats();
+  console.log('DB Stats');
+  console.log(`Pages count: ${stats.pages}`);
+  console.log(`Scan runs count: ${stats.scanRuns}`);
+  console.log(`Proposals total: ${stats.proposalsTotal}`);
+  console.log(`pending: ${stats.pending}`);
+  console.log(`applied: ${stats.applied}`);
+  console.log(`failed: ${stats.failed}`);
+  console.log(`invalid: ${stats.invalid}`);
+  console.log('');
+  console.log('TOP 10 pages by proposals:');
+  if (!stats.topPages.length) {
+    console.log('No proposals found.');
+    return;
+  }
+  stats.topPages.forEach((item, index) => {
+    console.log(`${index + 1}. ${item.pageUrl} — ${item.count}`);
+  });
+}
+
+async function cleanupFailed() {
+  const result = await cleanupFailedProposals(30);
+  console.log('cleanup-failed completed');
+  console.log(`Removed: ${result.removed}`);
+  console.log(`Failed: ${result.failed}`);
+  console.log(`Invalid: ${result.invalid}`);
+}
+
+function csvCell(value: unknown): string {
+  const text = value === undefined || value === null ? '' : String(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+async function exportProposals() {
+  const rows = await getProposalsForExport();
+  const exportDir = path.resolve(process.cwd(), 'exports');
+  if (!fs.existsSync(exportDir)) fs.mkdirSync(exportDir, { recursive: true });
+  const file = path.join(exportDir, 'proposals.csv');
+  const header = ['id', 'pageUrl', 'type', 'title', 'priority', 'status', 'createdAt'];
+  const lines = [
+    header.join(','),
+    ...rows.map((row) => [
+      row.id,
+      row.pageUrl,
+      row.type,
+      row.title,
+      row.priority,
+      row.status,
+      row.createdAt ?? '',
+    ].map(csvCell).join(',')),
+  ];
+  fs.writeFileSync(file, `${lines.join('\n')}\n`, 'utf8');
+  console.log(`Exported proposals: ${rows.length}`);
+  console.log(`File: ${file}`);
 }
 
 async function cleanupInvalid() {

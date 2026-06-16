@@ -32,6 +32,15 @@ export type MonitoringStatus =
   | 'unchanged'
   | 'declined';
 
+export const MONITORING_STATUSES: MonitoringStatus[] = [
+  'waiting_for_indexing',
+  'indexed_collecting_data',
+  'ready_for_analysis',
+  'improved',
+  'unchanged',
+  'declined',
+];
+
 export interface SeoPageData {
   url: string;
   title: string | null;
@@ -85,6 +94,15 @@ export interface SeoProposal {
   baselineCtr?: number;
   baselinePosition?: number;
   monitoringSource?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface MonitoringRecord {
+  id?: number;
+  proposalId: number;
+  pageUrl: string;
+  status: MonitoringStatus;
   createdAt?: string;
   updatedAt?: string;
 }

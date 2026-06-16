@@ -1,7 +1,7 @@
 import initSqlJs from 'sql.js';
 import fs from 'fs';
 import path from 'path';
-import { SeoPageData, SeoProposal } from './types.js';
+import { MonitoringRecord, SeoPageData, SeoProposal } from './types.js';
 import { config } from './config.js';
 
 const dbPath = path.resolve(process.cwd(), config.dbPath);
@@ -58,6 +58,15 @@ const ready = initSqlJs().then((m: any) => {
         urlCount INTEGER,
         pagesScanned INTEGER,
         issuesFound INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS monitoring_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proposalId INTEGER,
+        pageUrl TEXT,
+        status TEXT,
+        createdAt TEXT,
+        updatedAt TEXT
       );
     `;
   db.run(schema);
@@ -331,4 +340,102 @@ export async function getStats() {
   const scanRuns = runsStmt.step() ? runsStmt.getAsObject().count : 0;
   runsStmt.free();
   return { pages, proposals, scanRuns };
+}
+
+export async function getDbStats() {
+  await ensureReady();
+  const stats = await getStats();
+  const totalProposals = stats.proposals.reduce((sum, item) => sum + Number(item.count), 0);
+  const countByStatus = (status: string) => Number(stats.proposals.find((item) => item.status === status)?.count ?? 0);
+
+  const topStmt = db.prepare(`SELECT pageUrl, COUNT(*) as count FROM proposals GROUP BY pageUrl ORDER BY count DESC, pageUrl ASC LIMIT 10;`);
+  const topPages: Array<{ pageUrl: string; count: number }> = [];
+  while (topStmt.step()) {
+    const row = topStmt.getAsObject();
+    topPages.push({ pageUrl: String(row.pageUrl), count: Number(row.count) });
+  }
+  topStmt.free();
+
+  return {
+    pages: Number(stats.pages),
+    scanRuns: Number(stats.scanRuns),
+    proposalsTotal: totalProposals,
+    pending: countByStatus('pending'),
+    applied: countByStatus('applied'),
+    failed: countByStatus('failed'),
+    invalid: countByStatus('invalid'),
+    topPages,
+  };
+}
+
+export async function cleanupFailedProposals(days = 30): Promise<{ removed: number; failed: number; invalid: number }> {
+  await ensureReady();
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  const oldFailedStmt = db.prepare(`SELECT COUNT(*) as count FROM proposals WHERE status = 'failed' AND createdAt IS NOT NULL AND createdAt < ?;`);
+  oldFailedStmt.bind([cutoff]);
+  const failed = oldFailedStmt.step() ? Number(oldFailedStmt.getAsObject().count ?? 0) : 0;
+  oldFailedStmt.free();
+
+  const deleteStmt = db.prepare(`DELETE FROM proposals WHERE status = 'failed' AND createdAt IS NOT NULL AND createdAt < ?;`);
+  deleteStmt.bind([cutoff]);
+  while (deleteStmt.step()) {}
+  deleteStmt.free();
+
+  const invalidStmt = db.prepare(`
+    UPDATE proposals
+    SET status = 'invalid', updatedAt = ?
+    WHERE status != 'invalid'
+      AND (
+        proposedHtml IS NULL OR trim(proposedHtml) = ''
+        OR title IS NULL OR trim(title) = ''
+        OR reason IS NULL OR trim(reason) = ''
+      );
+  `);
+  invalidStmt.bind([new Date().toISOString()]);
+  while (invalidStmt.step()) {}
+  invalidStmt.free();
+
+  const changesStmt = db.prepare(`SELECT changes() as count;`);
+  const invalid = changesStmt.step() ? Number(changesStmt.getAsObject().count ?? 0) : 0;
+  changesStmt.free();
+
+  persist();
+  return { removed: failed, failed, invalid };
+}
+
+export async function getProposalsForExport(): Promise<Array<Pick<SeoProposal, 'id' | 'pageUrl' | 'type' | 'title' | 'priority' | 'status' | 'createdAt'>>> {
+  await ensureReady();
+  const stmt = db.prepare(`SELECT id, pageUrl, type, title, priority, status, createdAt FROM proposals ORDER BY id ASC;`);
+  const rows: Array<Pick<SeoProposal, 'id' | 'pageUrl' | 'type' | 'title' | 'priority' | 'status' | 'createdAt'>> = [];
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    rows.push({
+      id: Number(row.id),
+      pageUrl: String(row.pageUrl ?? ''),
+      type: String(row.type ?? ''),
+      title: String(row.title ?? ''),
+      priority: Number(row.priority ?? 0),
+      status: row.status as SeoProposal['status'],
+      createdAt: row.createdAt ? String(row.createdAt) : undefined,
+    });
+  }
+  stmt.free();
+  return rows;
+}
+
+export async function createMonitoringRecord(record: Omit<MonitoringRecord, 'id' | 'createdAt' | 'updatedAt'>): Promise<MonitoringRecord> {
+  await ensureReady();
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`INSERT INTO monitoring_records (proposalId,pageUrl,status,createdAt,updatedAt) VALUES (?,?,?,?,?);`);
+  stmt.bind(normalizeDbRow([record.proposalId, record.pageUrl, record.status, now, now], ['proposalId', 'pageUrl', 'status', 'createdAt', 'updatedAt'], record.pageUrl));
+  while (stmt.step()) {}
+  stmt.free();
+
+  const idStmt = db.prepare(`SELECT last_insert_rowid() as id;`);
+  const id = idStmt.step() ? Number(idStmt.getAsObject().id) : undefined;
+  idStmt.free();
+  persist();
+
+  return { ...record, id, createdAt: now, updatedAt: now };
 }
