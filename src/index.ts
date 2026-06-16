@@ -2,12 +2,11 @@ import crypto from 'crypto';
 import { parseSitemap } from './sitemap.js';
 import { analyzeHtml } from './seo.js';
 import { fetchText } from './http.js';
-import { savePage, saveProposal, getPendingProposals, getProposalById, getProposalBySignature, getPageByUrl, getStats, getPages, saveScanRun } from './db.js';
+import { savePage, saveProposal, getPendingProposals, getProposalById, getProposalBySignature, getProposalsByPage, getStats, getPages, saveScanRun } from './db.js';
 import { createSeoProposals } from './openai.js';
-import { getWpPageByUrl, updateWpContent, isWpArchiveUrl } from './wordpress.js';
+import { getWpPageByUrl, updateWpContent, isWpArchiveUrl, isEditableWpContentUrl } from './wordpress.js';
 import { sendScanReport, sendProposalsReport, sendApplySuccessReport, sendApplyFailureReport, sendTelegramTest, sendTelegramReport } from './telegram.js';
 import { appendAgentBlock, hasAgentBlockForProposal, hasAgentBlockForType } from './content.js';
-import { getSearchConsoleData } from './gsc.js';
 import { config, printStartupDiagnostics, validateForCommand } from './config.js';
 
 async function scan() {
@@ -61,14 +60,9 @@ async function proposals() {
   let jsonParsed = 0;
   let proposalsCreated = 0;
 
-  const searchData = await getSearchConsoleData(config.wpBaseUrl).catch((error) => {
-    console.warn('GSC access failed:', error instanceof Error ? error.message : error);
-    return [];
-  });
-  const searchSummary = searchData.length ? JSON.stringify(searchData.slice(0, 5)) : undefined;
   const rows = await getPages(config.scanLimit);
   const rowsToProcess = rows.filter((row) => {
-    if (isWpArchiveUrl(row.url)) {
+    if (!isEditableWpContentUrl(row.url)) {
       console.warn(`Skipping archive/taxonomy URL for proposals: ${row.url}`);
       return false;
     }
@@ -86,7 +80,7 @@ async function proposals() {
     };
 
     try {
-      const result = await createSeoProposals(row.url, pageData, searchSummary);
+      const result = await createSeoProposals(row.url, pageData);
       openAiResponses += 1;
       if (!result || !result.proposals) {
         console.warn(`No parsable proposals for ${row.url}. Raw saved to logs/openai_raw.log`);
@@ -94,9 +88,15 @@ async function proposals() {
       }
       jsonParsed += 1;
       for (const proposal of result.proposals) {
+        const pageProposals = await getProposalsByPage(proposal.pageUrl);
+        const activeSameType = pageProposals.find((item) => item.type === proposal.type && ['pending', 'applied'].includes(item.status));
+        if (activeSameType) {
+          console.warn(`Skipping proposal: pageUrl=${row.url} type=${proposal.type} title=${proposal.title || '<no title>'} reason=duplicate-active-type id=${activeSameType.id}`);
+          continue;
+        }
         const existing = await getProposalBySignature(proposal.pageUrl, proposal.type, proposal.title);
-        if (existing) {
-          console.warn(`Skipping proposal: pageUrl=${row.url} type=${proposal.type} title=${proposal.title || '<no title>'} reason=duplicate`);
+        if (existing && ['pending', 'applied'].includes(existing.status)) {
+          console.warn(`Skipping proposal: pageUrl=${row.url} type=${proposal.type} title=${proposal.title || '<no title>'} reason=duplicate-${existing.status}`);
           continue;
         }
         const skipReason = getProposalSkipReason(proposal, row.url);
@@ -164,8 +164,8 @@ async function apply() {
     process.exit(1);
   }
 
-  if (isWpArchiveUrl(proposal.pageUrl)) {
-    console.error('Archive/category URL cannot be edited by WordPress page API');
+  if (!isEditableWpContentUrl(proposal.pageUrl)) {
+    console.error('Archive/category/tag URL cannot be edited by WordPress page/post API');
     process.exit(1);
   }
 
@@ -211,7 +211,7 @@ async function apply() {
   try {
     const oldHash = hashString(content);
     const newHash = hashString(preview);
-    await updateWpContent(page.id, preview);
+    await updateWpContent(page.id, preview, page.restBase === 'posts' ? 'posts' : 'pages');
     await saveProposal({
       ...proposal,
       status: 'applied',
@@ -239,8 +239,8 @@ function hashString(value: string): string {
 
 function getProposalSkipReason(proposal: any, pageUrl: string): string | null {
   if (!proposal.htmlBlocks || !proposal.htmlBlocks.length) return 'missing htmlBlocks';
+  if (!proposal.proposedHtml || !isValidProposalHtmlContent(proposal.proposedHtml, proposal.type)) return 'invalid proposedHtml';
   if (proposal.type === 'faq' && proposal.htmlBlocks.every((block: any) => !hasFaqItems(block))) return 'faq items missing';
-  if ((proposal.type === 'faq' || proposal.type === 'seo_block') && !proposal.proposedHtml) return 'no text after buildProposedHtml';
   if (proposal.pageUrl && isWpArchiveUrl(proposal.pageUrl)) return 'archive URL';
   if (proposal.status && proposal.status !== 'pending') return 'invalid status';
   return null;
@@ -256,10 +256,14 @@ function hasFaqItems(block: any): boolean {
 function isValidProposalHtmlContent(html: string, type: string): boolean {
   const textOnly = html.replace(/<[^>]+>/g, '').trim();
   if (textOnly.length < 50) return false;
+  if (/<section[^>]*>\s*<\/section>/i.test(html)) return false;
   if (type === 'faq') {
-    return /<h3>.*<\/h3>/i.test(html) && /<p>.*<\/p>/i.test(html);
+    return (html.match(/<h3\b[^>]*>/gi)?.length ?? 0) >= 3 && (html.match(/<p\b[^>]*>/gi)?.length ?? 0) >= 3;
   }
-  return /<h2>.*<\/h2>/i.test(html) || /<p>.*<\/p>/i.test(html);
+  if (type === 'seo_block') {
+    return (html.match(/<h2\b[^>]*>/gi)?.length ?? 0) >= 1 && (html.match(/<p\b[^>]*>/gi)?.length ?? 0) >= 2;
+  }
+  return /<h2\b[^>]*>.*<\/h2>/i.test(html) || /<p\b[^>]*>.*<\/p>/i.test(html) || /<li\b[^>]*>.*<\/li>/i.test(html);
 }
 
 async function status() {
@@ -351,8 +355,6 @@ async function proposalDetail(id: number) {
   console.log(`reason: ${proposal.reason}`);
   console.log(`exactAction: ${proposal.exactAction}`);
   console.log(`status: ${proposal.status}`);
-  console.log(`monitoringStatus: ${proposal.monitoringStatus}`);
-  console.log(`monitoringUntil: ${proposal.monitoringUntil}`);
   console.log('proposedHtml:');
   console.log(proposal.proposedHtml);
 }

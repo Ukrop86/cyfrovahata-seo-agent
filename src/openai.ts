@@ -16,12 +16,17 @@ function escapeHtml(value: string): string {
 }
 
 function buildGenericSectionHtml(block: SeoProposalHtmlBlock, titleFallback: string): string {
-  const heading = block.heading ? `<h2>${escapeHtml(block.heading)}</h2>` : `<h2>${escapeHtml(titleFallback)}</h2>`;
-  const paragraphs = (block.paragraphs ?? []).map((text) => `<p>${escapeHtml(text)}</p>`).join('');
-  const textValue = typeof (block as any).text === 'string' ? String((block as any).text).trim() : '';
+  const headingText = block.heading || block.title || titleFallback;
+  const heading = headingText ? `<h2>${escapeHtml(headingText)}</h2>` : '';
+  const paragraphValues = [
+    ...(block.description ? [block.description] : []),
+    ...(block.paragraphs ?? []),
+  ].filter((text) => String(text).trim().length > 0);
+  const paragraphs = paragraphValues.map((text) => `<p>${escapeHtml(text)}</p>`).join('');
+  const textValue = typeof block.text === 'string' ? block.text.trim() : '';
   const paragraphFromText = textValue ? `<p>${escapeHtml(textValue)}</p>` : '';
-  const listItems = Array.isArray((block as any).internalLinks)
-    ? `<ul>${(block as any).internalLinks
+  const listItems = Array.isArray(block.internalLinks)
+    ? `<ul>${block.internalLinks
         .filter((link: any) => link && link.text && link.url)
         .map((link: any) => `<li><a href="${escapeHtml(link.url)}">${escapeHtml(link.text)}</a></li>`)
         .join('')}</ul>`
@@ -33,20 +38,26 @@ function buildGenericSectionHtml(block: SeoProposalHtmlBlock, titleFallback: str
 }
 
 function buildSeoBlockHtml(block: SeoProposalHtmlBlock, titleFallback: string): string {
-  const heading = block.heading ? `<h2>${escapeHtml(block.heading)}</h2>` : `<h2>${escapeHtml(titleFallback)}</h2>`;
-  const paragraphs = (block.paragraphs ?? []).map((text) => `<p>${escapeHtml(text)}</p>`).join('');
-  const textValue = typeof (block as any).text === 'string' ? String((block as any).text).trim() : '';
-  const paragraphFromText = textValue ? `<p>${escapeHtml(textValue)}</p>` : '';
-  if (!heading && !paragraphs && !paragraphFromText) return '';
-  return `<section class="cyfrovahata-seo-block">${heading}${paragraphs}${paragraphFromText}</section>`;
+  const headingText = block.heading || block.title || titleFallback;
+  const heading = headingText ? `<h2>${escapeHtml(headingText)}</h2>` : '';
+  const paragraphValues = [
+    ...(block.text ? [block.text] : []),
+    ...(block.description ? [block.description] : []),
+    ...(block.paragraphs ?? []),
+  ]
+    .map((text) => String(text).trim())
+    .filter(Boolean);
+  if (!heading || paragraphValues.length === 0) return '';
+  const paragraphs = paragraphValues.map((text) => `<p>${escapeHtml(text)}</p>`).join('');
+  return `<section class="cyfrovahata-seo-block">${heading}${paragraphs}</section>`;
 }
 
 function buildFaqHtml(block: SeoProposalHtmlBlock, titleFallback: string): string {
   const items = (block.items ?? [])
     .filter((item) => item && item.question && item.answer)
     .map((item) => ({ question: String(item.question), answer: String(item.answer) }));
-  if (!items.length && (block as any).question && (block as any).answer) {
-    items.push({ question: String((block as any).question), answer: String((block as any).answer) });
+  if (!items.length && block.question && block.answer) {
+    items.push({ question: String(block.question), answer: String(block.answer) });
   }
   if (!items.length) return '';
   const heading = block.heading ? `<h2>${escapeHtml(block.heading)}</h2>` : `<h2>${escapeHtml(titleFallback)}</h2>`;
@@ -69,7 +80,7 @@ function buildProposedHtml(proposal: SeoProposal): string {
   const html = proposal.htmlBlocks
     .map((block) => {
       if (proposal.type === 'faq') return buildFaqHtml(block, titleFallback);
-      if (proposal.type === 'seo_block' || proposal.type === 'content') return buildSeoBlockHtml(block, titleFallback);
+      if (proposal.type === 'seo_block') return buildSeoBlockHtml(block, titleFallback);
       return buildGenericSectionHtml(block, titleFallback);
     })
     .filter(Boolean)
@@ -123,11 +134,58 @@ function normalizeType(value: unknown): string {
   if (!value || typeof value !== 'string') return 'content';
   const normalized = value.trim().toLowerCase();
   if (normalized.includes('faq')) return 'faq';
-  if (normalized.includes('seo_block') || normalized === 'seo') return 'seo_block';
+  if (normalized.includes('seo_block') || normalized === 'seoblock' || normalized === 'seo') return 'seo_block';
   if (normalized.includes('internal_link') || normalized.includes('internal links') || normalized.includes('internal_links')) return 'internal_links';
   if (normalized.includes('title') || normalized.includes('description') || normalized.includes('content')) return 'content';
   if (['faq', 'seo_block', 'title', 'description', 'internal_links', 'content'].includes(normalized)) return normalized;
   return 'content';
+}
+
+function normalizeLinks(value: any): Array<{ text: string; url: string }> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const links = value
+    .filter((link) => link && link.text && link.url)
+    .map((link) => ({ text: String(link.text), url: String(link.url) }));
+  return links.length ? links : undefined;
+}
+
+function normalizeItems(value: any): Array<{ question: string; answer: string }> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const items = value
+    .filter((item) => item && item.question && item.answer)
+    .map((item) => ({ question: String(item.question), answer: String(item.answer) }));
+  return items.length ? items : undefined;
+}
+
+function normalizeParagraphs(rawBlock: any): string[] | undefined {
+  const values: string[] = [];
+  if (typeof rawBlock.text === 'string') values.push(rawBlock.text);
+  if (typeof rawBlock.description === 'string') values.push(rawBlock.description);
+  if (Array.isArray(rawBlock.paragraphs)) values.push(...rawBlock.paragraphs.map(String));
+  const normalized = values.map((text) => text.trim()).filter(Boolean);
+  return normalized.length ? normalized : undefined;
+}
+
+function normalizeObjectBlock(rawBlock: any): SeoProposalHtmlBlock {
+  const block: SeoProposalHtmlBlock = {
+    tag: String(rawBlock.tag ?? 'section'),
+    className: rawBlock.className ? String(rawBlock.className) : undefined,
+    heading: rawBlock.heading ? String(rawBlock.heading) : undefined,
+    paragraphs: normalizeParagraphs(rawBlock),
+    items: normalizeItems(rawBlock.items),
+    text: rawBlock.text ? String(rawBlock.text) : undefined,
+    question: rawBlock.question ? String(rawBlock.question) : undefined,
+    answer: rawBlock.answer ? String(rawBlock.answer) : undefined,
+    internalLinks: normalizeLinks(rawBlock.internalLinks ?? rawBlock.internal_links),
+    title: rawBlock.title ? String(rawBlock.title) : undefined,
+    description: rawBlock.description ? String(rawBlock.description) : undefined,
+  };
+
+  if (!block.items && block.question && block.answer) {
+    block.items = [{ question: block.question, answer: block.answer }];
+  }
+
+  return block;
 }
 
 function normalizeHtmlBlocks(value: any, proposalType: string): SeoProposalHtmlBlock[] | undefined {
@@ -153,36 +211,14 @@ function normalizeHtmlBlocks(value: any, proposalType: string): SeoProposalHtmlB
         continue;
       }
       if (rawBlock && typeof rawBlock === 'object') {
-        blocks.push({
-          tag: String(rawBlock.tag ?? 'section'),
-          className: rawBlock.className ? String(rawBlock.className) : undefined,
-          heading: rawBlock.heading ? String(rawBlock.heading) : undefined,
-          paragraphs: Array.isArray(rawBlock.paragraphs) ? rawBlock.paragraphs.map(String) : undefined,
-          items: Array.isArray(rawBlock.items)
-            ? rawBlock.items
-                .filter((item: any) => item && item.question && item.answer)
-                .map((item: any) => ({ question: String(item.question), answer: String(item.answer) }))
-            : undefined,
-        });
+        blocks.push(normalizeObjectBlock(rawBlock));
         continue;
       }
     }
     return blocks.length ? blocks : undefined;
   }
   if (value && typeof value === 'object') {
-    return [
-      {
-        tag: String((value as any).tag ?? 'section'),
-        className: (value as any).className ? String((value as any).className) : undefined,
-        heading: (value as any).heading ? String((value as any).heading) : undefined,
-        paragraphs: Array.isArray((value as any).paragraphs) ? (value as any).paragraphs.map(String) : undefined,
-        items: Array.isArray((value as any).items)
-          ? (value as any).items
-              .filter((item: any) => item && item.question && item.answer)
-              .map((item: any) => ({ question: String(item.question), answer: String(item.answer) }))
-          : undefined,
-      },
-    ];
+    return [normalizeObjectBlock(value)];
   }
   return undefined;
 }
@@ -219,8 +255,10 @@ export async function createSeoProposals(pageUrl: string, pageData: { title: str
   const promptParts = [
     'You are a helpful SEO assistant. Return ONLY valid JSON — a JSON array of proposal objects. No markdown, no explanation, no backticks, no HTML.',
     'Use only plain strings and arrays. Do not use newline characters inside string values.',
-    'Return up to 3 proposals: 1 faq, 1 seo_block, and 1 content/title/description/internal_links proposal.',
+    'Return up to 3 proposals: exactly 1 faq, 1 seo_block, and optionally 1 content/title/description/internal_links proposal.',
     'Each proposal must include pageUrl, type, title, priority, reason, exactAction, htmlBlocks.',
+    'For faq: htmlBlocks must include one block with items array containing at least 3 objects with question and answer.',
+    'For seo_block: htmlBlocks must include a heading and 2 to 4 substantial paragraphs.',
     'Do not include proposedHtml in the response. htmlBlocks must contain plain text fields only.',
     `Page URL: ${pageUrl}`,
     `Title: ${pageData.title ?? 'N/A'}`,
@@ -255,7 +293,20 @@ export async function createSeoProposals(pageUrl: string, pageData: { title: str
                 tag: { type: 'string' },
                 className: { type: 'string' },
                 heading: { type: 'string' },
+                text: { type: 'string' },
+                title: { type: 'string' },
+                description: { type: 'string' },
                 paragraphs: { type: 'array', items: { type: 'string' } },
+                internalLinks: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      text: { type: 'string' },
+                      url: { type: 'string' },
+                    },
+                  },
+                },
                 items: {
                   type: 'array',
                   items: {
@@ -280,10 +331,13 @@ export async function createSeoProposals(pageUrl: string, pageData: { title: str
   const request: any = {
     model: 'gpt-4.1-mini',
     input,
-    max_output_tokens: 1000,
-    response_format: {
-      type: 'json_schema',
-      json_schema: schema,
+    max_output_tokens: 2000,
+    text: {
+      format: {
+        type: 'json_schema',
+        name: schema.name,
+        schema: schema.schema,
+      },
     },
   };
 
@@ -296,7 +350,7 @@ export async function createSeoProposals(pageUrl: string, pageData: { title: str
     const fallbackRequest: any = {
       model: 'gpt-4.1-mini',
       input,
-      max_output_tokens: 1000,
+      max_output_tokens: 2000,
     };
     response = await client.responses.create(fallbackRequest);
   }
@@ -344,6 +398,30 @@ export async function createSeoProposals(pageUrl: string, pageData: { title: str
   }
 
   return { proposals: selected, raw };
+}
+
+function textLength(html: string): number {
+  return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().length;
+}
+
+function countMatches(html: string, regex: RegExp): number {
+  return html.match(regex)?.length ?? 0;
+}
+
+function isValidProposalHtml(proposal: SeoProposal): boolean {
+  const html = proposal.proposedHtml?.trim() ?? '';
+  if (!html || textLength(html) < 50) return false;
+  if (/<section[^>]*>\s*<\/section>/i.test(html)) return false;
+
+  if (proposal.type === 'faq') {
+    return countMatches(html, /<h3\b[^>]*>/gi) >= 3 && countMatches(html, /<p\b[^>]*>/gi) >= 3;
+  }
+
+  if (proposal.type === 'seo_block') {
+    return countMatches(html, /<h2\b[^>]*>/gi) >= 1 && countMatches(html, /<p\b[^>]*>/gi) >= 2;
+  }
+
+  return countMatches(html, /<h2\b[^>]*>/gi) >= 1 || countMatches(html, /<p\b[^>]*>/gi) >= 1 || countMatches(html, /<li\b[^>]*>/gi) >= 1;
 }
 
 export default null;

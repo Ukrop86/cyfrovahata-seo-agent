@@ -56,6 +56,12 @@ export interface SeoProposalHtmlBlock {
   heading?: string;
   paragraphs?: string[];
   items?: SeoProposalBlockItem[];
+  text?: string;
+  question?: string;
+  answer?: string;
+  internalLinks?: Array<{ text: string; url: string }>;
+  title?: string;
+  description?: string;
 }
 
 export interface SeoProposal {

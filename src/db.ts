@@ -229,7 +229,7 @@ export async function saveProposal(proposal: SeoProposal): Promise<SeoProposal> 
     while (update.step()) {}
     update.free();
     persist();
-    return { ...proposal, ...safeProposal, priority: priorityValue };
+    return toSeoProposal({ ...proposal, ...safeProposal, priority: priorityValue });
   }
   const stmt = db.prepare(`INSERT INTO proposals (pageUrl,type,title,priority,reason,exactAction,proposedHtml,status,appliedAt,oldContentHash,newContentHash,monitoringUntil,monitoringStatus,baselineClicks,baselineImpressions,baselineCtr,baselinePosition,monitoringSource,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);`);
   const now = new Date().toISOString();
@@ -237,7 +237,23 @@ export async function saveProposal(proposal: SeoProposal): Promise<SeoProposal> 
   while (stmt.step()) {}
   stmt.free();
   persist();
-  return { ...proposal, ...safeProposal, priority: priorityValue };
+  return toSeoProposal({ ...proposal, ...safeProposal, priority: priorityValue });
+}
+
+function toSeoProposal(value: any): SeoProposal {
+  return {
+    ...value,
+    appliedAt: value.appliedAt ?? undefined,
+    oldContentHash: value.oldContentHash ?? undefined,
+    newContentHash: value.newContentHash ?? undefined,
+    monitoringUntil: value.monitoringUntil ?? undefined,
+    monitoringStatus: value.monitoringStatus ?? undefined,
+    baselineClicks: value.baselineClicks ?? undefined,
+    baselineImpressions: value.baselineImpressions ?? undefined,
+    baselineCtr: value.baselineCtr ?? undefined,
+    baselinePosition: value.baselinePosition ?? undefined,
+    monitoringSource: value.monitoringSource ?? undefined,
+  };
 }
 
 export async function getPendingProposals(): Promise<SeoProposal[]> {
