@@ -625,6 +625,16 @@ async function buildDailyReport(latest: string): Promise<string> {
   const attention = pages.filter((p) => p.impressionsDiff < 0 || p.clicksDiff < 0).sort((a, b) => a.clicksDiff - b.clicksDiff).slice(0, 3);
   const growing = pages.filter((p) => p.clicksDiff > 0 || p.impressionsDiff > 0).sort((a, b) => b.clicksDiff - a.clicksDiff).slice(0, 3);
   const recentChanges = await getSeoChangeLogEntries({ startDate: addDays(latest, -14), endDate: latest });
+  const appliedChanges = recentChanges.slice(0, 5);
+  const waitingPages = recentChanges.filter((change) => diffDays(change.appliedAt.slice(0, 10), latest) < 14).slice(0, 5);
+  const ctrProblems = pages.filter((p) => p.problemType === 'ctr_problem').slice(0, 5);
+  const opportunities = getOpportunityPages(pages).slice(0, 5);
+  const winners = pages.filter((p) => p.problemType === 'winner').slice(0, 5);
+  const losers = pages.filter((p) => p.problemType === 'loser').slice(0, 5);
+  const proposals = await getAllProposals();
+  const pendingBlocked = proposals
+    .filter((proposal) => proposal.status === 'pending' && waitingPages.some((change) => change.pageUrl === proposal.pageUrl))
+    .slice(0, 5);
 
   return [
     '📊 SEO Daily Report',
@@ -652,14 +662,36 @@ async function buildDailyReport(latest: string): Promise<string> {
     '🧠 Висновок AI:',
     humanTrend(trend) + '.',
     '',
+    'Примітка:',
+    'На старті періоду могли бути власні тестові переходи, тому CTR/кліки треба оцінювати обережно й не реагувати на один день як на остаточний тренд.',
+    '',
     '✅ Що добре:',
     growing.length ? growing.map((p) => `* ${p.pageUrl}`).join('\n') : '* Немає явного росту за останній день.',
+    '',
+    '🏆 Переможці:',
+    formatUrlList(winners, 'Немає явних переможців за день.'),
+    '',
+    '📉 Просідання:',
+    formatUrlList(losers, 'Критичних просідань не видно.'),
     '',
     '⚠️ Що потребує уваги:',
     attention.length ? attention.map((p) => `* ${p.pageUrl}`).join('\n') : '* Критичних просідань за день не видно.',
     '',
+    '🎯 CTR-проблеми:',
+    formatUrlList(ctrProblems, 'Немає виражених CTR-проблем за день.'),
+    '',
+    '🚀 Топ можливості:',
+    formatUrlList(opportunities, 'Немає нових топ-можливостей за день.'),
+    '',
+    '📝 Останні застосовані зміни:',
+    appliedChanges.length ? appliedChanges.map((change) => `* ${change.appliedAt.slice(0, 10)} — ${change.pageUrl} — ${change.changeType}`).join('\n') : '* Немає застосованих змін за останні 14 днів.',
+    '',
+    '⏳ Сторінки в очікуванні індексації:',
+    waitingPages.length ? waitingPages.map((change) => `* ${change.pageUrl} — зміна ${change.id}, ${change.appliedAt.slice(0, 10)}`).join('\n') : '* Немає сторінок у 14-денному cooldown.',
+    '',
     '⏳ Що поки не чіпати:',
     recentChanges.length ? recentChanges.slice(0, 3).map((change) => `* ${change.pageUrl} — була зміна ${change.appliedAt.slice(0, 10)}`).join('\n') : '* Сторінки без достатньої статистики або зі свіжими змінами.',
+    pendingBlocked.length ? '\nPending-пропозиції, які краще не чіпати зараз:\n' + pendingBlocked.map((proposal) => `* #${proposal.id} ${proposal.pageUrl} — ${proposal.type}`).join('\n') : '',
     '',
     '🎯 Наступна рекомендована дія:',
     trend === 'declining' || trend === 'visibility_growth_ctr_problem' ? '* Перевірити сторінки з падінням кліків і CTR.' : '* Накопичувати дані та точково дивитись сторінки з високими показами і низьким CTR.',
@@ -779,30 +811,198 @@ async function buildMonthlyReport(latest: string): Promise<string> {
   ].join('\n');
 }
 
-export async function evaluateSeoChangeImpact(pageUrl: string, changeId: number): Promise<SeoChangeImpactStatus> {
+export type SeoChangeImpactResult = {
+  changeId: number;
+  pageUrl: string;
+  changeType: string;
+  appliedAt: string;
+  status: SeoChangeImpactStatus;
+  conclusion: 'too_early' | 'positive' | 'neutral' | 'negative' | 'not_enough_data';
+  beforeStart: string;
+  beforeEnd: string;
+  afterStart: string;
+  afterEnd: string;
+  afterDaysAvailable: number;
+  before: {
+    clicks: number;
+    impressions: number;
+    ctr: number;
+    position: number;
+  };
+  after: {
+    clicks: number;
+    impressions: number;
+    ctr: number;
+    position: number;
+  };
+  delta: {
+    clicks: number;
+    impressions: number;
+    ctr: number;
+    position: number;
+  };
+  deltaPercent: {
+    clicks: number;
+    impressions: number;
+    ctr: number;
+    position: number;
+  };
+  note?: string;
+};
+
+export async function getSeoChangeImpactDetails(changeId: number): Promise<SeoChangeImpactResult | null> {
   const change = await getSeoChangeLogEntryById(changeId);
-  if (!change || change.pageUrl !== pageUrl) return 'not_enough_data';
+  if (!change) return null;
+
+  const pageUrl = change.pageUrl;
   const changeDate = change.appliedAt.slice(0, 10);
   const latest = await getLatestGscDate();
-  if (!latest) return 'not_enough_data';
-  if (diffDays(changeDate, latest) < 14) return 'waiting_for_result';
 
-  const before = await getGscAnalyticsRecords({ pageUrl, startDate: addDays(changeDate, -14), endDate: addDays(changeDate, -1) });
-  const after = await getGscAnalyticsRecords({ pageUrl, startDate: changeDate, endDate: addDays(changeDate, 13) });
-  const beforeSummary = aggregate(before);
-  const afterSummary = aggregate(after);
-  if (beforeSummary.impressions < 30 || afterSummary.impressions < 30) return 'not_enough_data';
+  const beforeStart = addDays(changeDate, -14);
+  const beforeEnd = addDays(changeDate, -1);
+  const afterStart = changeDate;
+  const plannedAfterEnd = addDays(changeDate, 13);
+  const afterEnd = latest && latest < plannedAfterEnd ? latest : plannedAfterEnd;
+  const afterDaysAvailable = latest && latest >= afterStart ? diffDays(afterStart, afterEnd) + 1 : 0;
 
-  const clicksUp = afterSummary.clicks > beforeSummary.clicks;
-  const impressionsUp = afterSummary.impressions > beforeSummary.impressions;
-  const positionUp = afterSummary.position > 0 && beforeSummary.position > 0 && afterSummary.position < beforeSummary.position;
-  const clicksDown = afterSummary.clicks < beforeSummary.clicks;
-  const impressionsDown = afterSummary.impressions < beforeSummary.impressions;
-  const positionDown = afterSummary.position > beforeSummary.position;
+  const emptySummary = { clicks: 0, impressions: 0, ctr: 0, position: 0 };
+  const emptyPercent = { clicks: 0, impressions: 0, ctr: 0, position: 0 };
 
-  if (clicksUp && impressionsUp && positionUp) return 'improved';
-  if (clicksDown || impressionsDown || positionDown) return 'declined';
-  return 'unchanged';
+  if (!latest) {
+    return {
+      changeId,
+      pageUrl,
+      changeType: change.changeType,
+      appliedAt: change.appliedAt,
+      status: 'not_enough_data',
+      conclusion: 'not_enough_data',
+      beforeStart,
+      beforeEnd,
+      afterStart,
+      afterEnd,
+      afterDaysAvailable,
+      before: emptySummary,
+      after: emptySummary,
+      delta: emptySummary,
+      deltaPercent: emptyPercent,
+      note: 'Немає GSC-даних.',
+    };
+  }
+
+  const beforeRecords = await getGscAnalyticsRecords({
+    pageUrl,
+    startDate: beforeStart,
+    endDate: beforeEnd,
+  });
+
+  const afterRecords = await getGscAnalyticsRecords({
+    pageUrl,
+    startDate: afterStart,
+    endDate: afterEnd,
+  });
+
+  const before = aggregate(beforeRecords);
+  const after = aggregate(afterRecords);
+
+  const delta = {
+    clicks: after.clicks - before.clicks,
+    impressions: after.impressions - before.impressions,
+    ctr: after.ctr - before.ctr,
+    position: before.position - after.position,
+  };
+
+  const deltaPercent = {
+    clicks: percentChange(after.clicks, before.clicks),
+    impressions: percentChange(after.impressions, before.impressions),
+    ctr: percentChange(after.ctr, before.ctr),
+    position: before.position > 0 ? (before.position - after.position) / before.position : 0,
+  };
+
+  if (afterDaysAvailable < 7) {
+    return {
+      changeId,
+      pageUrl,
+      changeType: change.changeType,
+      appliedAt: change.appliedAt,
+      status: 'too_early',
+      conclusion: 'too_early',
+      beforeStart,
+      beforeEnd,
+      afterStart,
+      afterEnd,
+      afterDaysAvailable,
+      before,
+      after,
+      delta,
+      deltaPercent,
+      note: 'Після SEO-зміни минуло менше 7 днів, робити висновок ще рано.',
+    };
+  }
+
+  if (before.impressions < 30 || after.impressions < 30) {
+    return {
+      changeId,
+      pageUrl,
+      changeType: change.changeType,
+      appliedAt: change.appliedAt,
+      status: 'not_enough_data',
+      conclusion: 'not_enough_data',
+      beforeStart,
+      beforeEnd,
+      afterStart,
+      afterEnd,
+      afterDaysAvailable,
+      before,
+      after,
+      delta,
+      deltaPercent,
+      note: 'Недостатньо показів для чесної оцінки.',
+    };
+  }
+
+  const clicksImproved = delta.clicks > 0;
+  const impressionsImproved = delta.impressions > 0;
+  const ctrImproved = delta.ctr > 0;
+  const positionImproved = delta.position > 0;
+
+  const clicksDeclined = delta.clicks < 0;
+  const ctrDeclined = delta.ctr < -0.005;
+  const positionDeclined = delta.position < -2;
+
+  let status: SeoChangeImpactStatus = 'unchanged';
+  let conclusion: SeoChangeImpactResult['conclusion'] = 'neutral';
+
+  if ((clicksImproved || impressionsImproved || ctrImproved) && !positionDeclined) {
+    status = 'improved';
+    conclusion = 'positive';
+  } else if (clicksDeclined || ctrDeclined || positionDeclined) {
+    status = 'declined';
+    conclusion = 'negative';
+  }
+
+  return {
+    changeId,
+    pageUrl,
+    changeType: change.changeType,
+    appliedAt: change.appliedAt,
+    status,
+    conclusion,
+    beforeStart,
+    beforeEnd,
+    afterStart,
+    afterEnd,
+    afterDaysAvailable,
+    before,
+    after,
+    delta,
+    deltaPercent,
+  };
+}
+
+export async function evaluateSeoChangeImpact(pageUrl: string, changeId: number): Promise<SeoChangeImpactStatus> {
+  const impact = await getSeoChangeImpactDetails(changeId);
+  if (!impact || impact.pageUrl !== pageUrl) return 'not_enough_data';
+  return impact.status;
 }
 
 export async function getPageSeoHealth(pageUrl: string): Promise<PageSeoHealth> {
@@ -1031,6 +1231,17 @@ export async function buildSeoAnalystReport(): Promise<string> {
   const queryOpportunities = await getQueryOpportunities(90);
   const { growing: growingQueries, declining: decliningQueries } = await getKeywordGrowth(30);
   const changes = await getSeoChangeLogEntries();
+    const changeImpactResults = [];
+  for (const change of changes) {
+    if (!change.id) continue;
+    const impact = await getSeoChangeImpactDetails(change.id);
+    if (!impact) continue;
+    changeImpactResults.push({ change, impact });
+  }
+
+  const workedChanges = changeImpactResults.filter((item) => item.impact.conclusion === 'positive' || item.impact.status === 'improved').slice(0, 5);
+  const failedChanges = changeImpactResults.filter((item) => item.impact.conclusion === 'negative' || item.impact.status === 'declined').slice(0, 5);
+  const waitingChanges = changeImpactResults.filter((item) => item.impact.conclusion === 'too_early' || item.impact.status === 'waiting_for_result' || item.impact.status === 'too_early').slice(0, 5);
   const proposals = await getAllProposals();
   const monitoring = await getMonitoringRecords();
   const health = await calculateSeoHealthScore(30);
@@ -1105,6 +1316,23 @@ export async function buildSeoAnalystReport(): Promise<string> {
     '',
     '⚠️ Що потребує уваги',
     formatUrlList(attentionPages, 'Немає сторінок із достатніми даними та явним падінням.'),
+    '',
+    '📈 Що спрацювало',
+    workedChanges.length
+      ? workedChanges.map((item) => `* ${item.change.title} — ${item.change.pageUrl}; кліки ${item.impact.before.clicks} → ${item.impact.after.clicks}, покази ${item.impact.before.impressions} → ${item.impact.after.impressions}, CTR ${pct(item.impact.before.ctr)} → ${pct(item.impact.after.ctr)}`).join('\n')
+      : '* Поки немає підтверджених SEO-змін з позитивним результатом.',
+    '',
+
+    '📉 Що не спрацювало',
+    failedChanges.length
+      ? failedChanges.map((item) => `* ${item.change.title} — ${item.change.pageUrl}; кліки ${item.impact.before.clicks} → ${item.impact.after.clicks}, покази ${item.impact.before.impressions} → ${item.impact.after.impressions}, CTR ${pct(item.impact.before.ctr)} → ${pct(item.impact.after.ctr)}`).join('\n')
+      : '* Поки немає SEO-змін, які явно погіршили результат.',
+    '',
+
+    '⏳ Що ще рано оцінювати',
+    waitingChanges.length
+      ? waitingChanges.map((item) => `* ${item.change.title} — ${item.change.pageUrl}; ${item.impact.note || 'ще немає повних 14 днів після зміни.'}`).join('\n')
+      : '* Немає свіжих SEO-змін у режимі очікування.',
     '',
     'SEO-зміни в історії:',
     `* change log: ${changes.length}`,

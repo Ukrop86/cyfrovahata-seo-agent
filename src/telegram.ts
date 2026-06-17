@@ -1,4 +1,6 @@
 import { config } from './config.js';
+import { updateProposalStatus } from './db.js';
+import { SeoProposal } from './types.js';
 
 const baseUrl = `https://api.telegram.org/bot${config.telegramBotToken}`;
 
@@ -11,6 +13,25 @@ export async function sendTelegramMessage(message: string): Promise<Response> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: config.telegramChatId, text: normalizeText(message) }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`Telegram API error ${response.status}: ${body}`);
+  }
+
+  return response;
+}
+
+export async function sendTelegramMessageWithKeyboard(message: string, inlineKeyboard: Array<Array<{ text: string; callback_data: string }>>): Promise<Response> {
+  const response = await fetch(`${baseUrl}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: config.telegramChatId,
+      text: normalizeText(message),
+      reply_markup: { inline_keyboard: inlineKeyboard },
+    }),
   });
 
   if (!response.ok) {
@@ -35,6 +56,58 @@ export async function sendProposalsReport(topProposals: string[]): Promise<Respo
     ? '📋 SEO-пропозицій немає.'
     : `📋 SEO-пропозиції:\n${topProposals.join('\n')}`;
   return sendTelegramMessage(message);
+}
+
+export async function sendProposalActionMessage(proposal: SeoProposal): Promise<Response> {
+  const id = proposal.id ?? 0;
+  const message = [
+    '📋 Нова SEO-пропозиція',
+    '',
+    `ID: ${id}`,
+    `Сторінка: ${proposal.pageUrl}`,
+    `Тип: ${proposal.type}`,
+    `Назва: ${proposal.title}`,
+    `Причина: ${proposal.reason}`,
+  ].join('\n');
+
+  return sendTelegramMessageWithKeyboard(message, [
+    [
+      { text: '✅ Застосувати', callback_data: `proposal:apply:${id}` },
+      { text: '❌ Відхилити', callback_data: `proposal:reject:${id}` },
+    ],
+    [
+      { text: '🔄 Перегенерувати', callback_data: `proposal:regenerate:${id}` },
+      { text: '👁 Деталі', callback_data: `proposal:detail:${id}` },
+    ],
+  ]);
+}
+
+export async function handleProposalCallback(callbackData: string): Promise<string> {
+  const [, action, idValue] = callbackData.split(':');
+  const id = Number(idValue);
+  if (!callbackData.startsWith('proposal:') || Number.isNaN(id)) {
+    return 'Unsupported callback payload.';
+  }
+
+  if (action === 'reject') {
+    await updateProposalStatus(id, 'invalid', 'Rejected from Telegram callback');
+    return `Proposal ${id} rejected.`;
+  }
+
+  if (action === 'apply') {
+    return `Run: npm run dev -- apply ${id}`;
+  }
+
+  if (action === 'detail') {
+    return `Run: npm run dev -- proposal-detail ${id}`;
+  }
+
+  if (action === 'regenerate') {
+    await updateProposalStatus(id, 'invalid', 'Regeneration requested from Telegram callback');
+    return `Proposal ${id} marked invalid. Run: npm run dev -- proposals`;
+  }
+
+  return 'Unsupported proposal action.';
 }
 
 export async function sendApplyReport(applied: number, failed: number): Promise<Response> {

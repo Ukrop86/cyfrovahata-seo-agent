@@ -167,6 +167,26 @@ function ensureSchema() {
       db.run(`ALTER TABLE proposals ADD COLUMN ${col.name} ${col.type};`);
     }
   }
+
+  const changeStmt = db.prepare('PRAGMA table_info(seo_change_log);');
+  const changeColumns: Set<string> = new Set();
+  while (changeStmt.step()) {
+    const row = changeStmt.getAsObject();
+    changeColumns.add(row.name);
+  }
+  changeStmt.free();
+
+  const changeAdditionalColumns = [
+    { name: 'relatedProposalId', type: 'INTEGER' },
+    { name: 'beforeSnapshot', type: 'TEXT' },
+    { name: 'afterSnapshot', type: 'TEXT' },
+  ];
+
+  for (const col of changeAdditionalColumns) {
+    if (!changeColumns.has(col.name)) {
+      db.run(`ALTER TABLE seo_change_log ADD COLUMN ${col.name} ${col.type};`);
+    }
+  }
 }
 
 function ensureIndexes() {
@@ -178,6 +198,8 @@ function ensureIndexes() {
     CREATE INDEX IF NOT EXISTS idx_gsc_query_records_query ON gsc_query_records(query);
     CREATE INDEX IF NOT EXISTS idx_seo_change_log_page ON seo_change_log(pageUrl);
     CREATE INDEX IF NOT EXISTS idx_seo_change_log_applied ON seo_change_log(appliedAt);
+    CREATE INDEX IF NOT EXISTS idx_seo_change_log_related_proposal ON seo_change_log(relatedProposalId);
+    CREATE INDEX IF NOT EXISTS idx_proposals_page_type_status ON proposals(pageUrl, type, status);
     CREATE INDEX IF NOT EXISTS idx_seo_insights_period ON seo_analysis_insights(period);
     CREATE INDEX IF NOT EXISTS idx_monitoring_records_page ON monitoring_records(pageUrl);
   `);
@@ -269,8 +291,8 @@ export async function getPages(limit = 100): Promise<SeoPageData[]> {
 
 export async function saveProposal(proposal: SeoProposal): Promise<SeoProposal> {
   await ensureReady();
-  const safeProposal = {
-    pageUrl: proposal.pageUrl ?? '',
+  const safeProposal = { 
+    pageUrl: proposal.pageUrl ?? '', 
     type: proposal.type ?? 'content',
     title: proposal.title ?? '',
     priority: proposal.priority ?? 2,
@@ -309,15 +331,18 @@ export async function saveProposal(proposal: SeoProposal): Promise<SeoProposal> 
     while (update.step()) {}
     update.free();
     persist();
-    return toSeoProposal({ ...proposal, ...safeProposal, priority: priorityValue });
+    return toSeoProposal({ ...proposal, ...safeProposal, id: Number(exists.id), priority: priorityValue });
   }
   const stmt = db.prepare(`INSERT INTO proposals (pageUrl,type,title,priority,reason,exactAction,proposedHtml,status,appliedAt,oldContentHash,newContentHash,monitoringUntil,monitoringStatus,baselineClicks,baselineImpressions,baselineCtr,baselinePosition,monitoringSource,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);`);
   const now = new Date().toISOString();
   stmt.bind(normalizeDbRow([safeProposal.pageUrl, safeProposal.type, safeProposal.title, priorityValue, safeProposal.reason, safeProposal.exactAction, safeProposal.proposedHtml, safeProposal.status, safeProposal.appliedAt, safeProposal.oldContentHash, safeProposal.newContentHash, safeProposal.monitoringUntil, safeProposal.monitoringStatus, safeProposal.baselineClicks, safeProposal.baselineImpressions, safeProposal.baselineCtr, safeProposal.baselinePosition, safeProposal.monitoringSource, now, now], ['pageUrl', 'type', 'title', 'priority', 'reason', 'exactAction', 'proposedHtml', 'status', 'appliedAt', 'oldContentHash', 'newContentHash', 'monitoringUntil', 'monitoringStatus', 'baselineClicks', 'baselineImpressions', 'baselineCtr', 'baselinePosition', 'monitoringSource', 'createdAt', 'updatedAt'], safeProposal.pageUrl));
   while (stmt.step()) {}
   stmt.free();
+  const idStmt = db.prepare(`SELECT last_insert_rowid() as id;`);
+  const id = idStmt.step() ? Number(idStmt.getAsObject().id) : undefined;
+  idStmt.free();
   persist();
-  return toSeoProposal({ ...proposal, ...safeProposal, priority: priorityValue });
+  return toSeoProposal({ ...proposal, ...safeProposal, id, priority: priorityValue });
 }
 
 function toSeoProposal(value: any): SeoProposal {
@@ -750,6 +775,41 @@ export async function getSeoChangeLogEntries(options: { pageUrl?: string; startD
   }
   stmt.free();
   return rows;
+}
+
+export async function saveSeoChangeLogEntry(entry: {
+  pageUrl: string;
+  changeType: string;
+  title: string;
+  description?: string;
+  appliedAt?: string;
+}): Promise<void> {
+  await ensureReady();
+
+  const now = new Date().toISOString();
+
+  const stmt = db.prepare(`
+    INSERT INTO seo_change_log
+    (pageUrl, changeType, title, description, appliedAt, createdAt)
+    VALUES (?, ?, ?, ?, ?, ?);
+  `);
+
+  stmt.bind(normalizeDbRow(
+    [
+      entry.pageUrl,
+      entry.changeType,
+      entry.title,
+      entry.description ?? '',
+      entry.appliedAt ?? now,
+      now,
+    ],
+    ['pageUrl', 'changeType', 'title', 'description', 'appliedAt', 'createdAt'],
+    entry.pageUrl
+  ));
+
+  while (stmt.step()) {}
+  stmt.free();
+  persist();
 }
 
 export async function getSeoChangeLogEntryById(id: number): Promise<SeoChangeLogEntry | null> {

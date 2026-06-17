@@ -184,7 +184,7 @@ export interface SeoAnalysisInsight {
   createdAt?: string;
 }
 
-export type SeoChangeImpactStatus = 'waiting_for_result' | 'improved' | 'unchanged' | 'declined' | 'not_enough_data';
+export type SeoChangeImpactStatus = 'waiting_for_result' | 'improved' | 'unchanged' | 'declined' | 'not_enough_data' | 'too_early' | 'positive' | 'neutral' | 'negative';
 
 export type RecommendationStatus =
   | 'do_not_touch'
